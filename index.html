@@ -1729,14 +1729,17 @@ function updateGame(dt){
       } else if(c.state==='walk'){ c.state='sit'; c.x=c.tx;c.y=c.ty; }
       else if(c.state==='leave'||c.state==='leaveAngry'){ if(d<=3){ G.customers.splice(i,1); continue; } }
     }
-    c.slipCd=Math.max(0,c.slipCd-dt); c.settleT=Math.max(0,(c.settleT||0)-dt);
+    c.slipCd=Math.max(0,c.slipCd-dt);
+    if(c.settleT>0){ c.settleT=Math.max(0,c.settleT-dt);
+      if(c.settleT<=0&&c.state==='waiting'){ floater(c.x,c.y-56,'!','#ffd93d',15); c.idleK='watch'; c.idleT=0.5; } // "okay, I'm ready to order now"
+    }
     if(c.state==='sigh'){ c.sighT-=dt; if(c.sighT<=0)customerAngryLeave(c); }
     if(c.state==='sit'){
       c.thinkT-=dt*anim;
       if(c.thinkT<=0){
         c.state='waiting'; c.orderT=0; A.sfx('pop');
-        c.patience=Math.min(c.maxPat, c.patience+c.maxPat*rnd(0.2,0.35)); // fair start: settling-in boost
-        c.settleT=2; // and a brief grace window before the drain ramps up
+        c.settleT=rnd(4,5); // sitting down, looking around, reading the menu -- patience barely moves yet
+        c.idleK='look'; c.idleT=0.6; // a little "just got comfortable" glance
       }
     }
     if(c.state==='queue'||c.state==='waiting'){
@@ -1747,7 +1750,7 @@ function updateGame(dt){
       c.modT=(c.modT||0)-dt;
       if(c.modT<=0){
         c.modT=0.12;
-        let mod=(c.state==='queue'?0.62:1)*fireFear; // blackout is atmosphere now, not a patience penalty
+        let mod=(c.state==='queue'?0.75:1)*fireFear; // queue nudged less forgiving -- clean tables, don't stall // blackout is atmosphere now, not a patience penalty
         mod*=1+G.smoke*0.35;                       // smoke frays nerves
         if(G.viralT>0)mod*=1.25;                   // bad press in everyone's feed
         for(const o of G.customers){
@@ -1763,7 +1766,7 @@ function updateGame(dt){
         if(c.type==='biz'&&(G.fires.length>0||G.rats.length>0))mod*=1.8; // businessmen do not wait around
         if(c.state==='waiting'&&c.orders.some(f=>{const st=G.stations.find(s=>s.id===FOODS[f].station);return st&&st.state==='broken';}))
           mod*=1.3; // they can see their machine smoking
-        if(c.settleT>0) mod*=0.4; // just sat down -- give them a fair moment before the pressure's on
+        if(c.settleT>0) mod*=0.08; // just sat down -- practically frozen until they've settled in
         mod/=evtMod('patience',1); // events can make the room more forgiving
         c.mod=clamp(mod,0.35,3);
       }
