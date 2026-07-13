@@ -985,7 +985,7 @@ function newGame(){
   const maxH=5+Math.min(2,S.data.prestige||0);
   G={
     t:0, money:0, hearts:maxH, maxHearts:maxH, over:false, endT:0, runMod:useMod, hardMode:hard,
-    combo:0, comboT:0, maxCombo:0,
+    combo:0, comboT:0, maxCombo:0, lastInputT:0,
     served:0, angry:0, firesOut:0, disasters:0,
     panic:0, panicSm:0,
     customers:[], rats:[], puddles:[], fires:[], stories:[], cats:[], birds:[],
@@ -1005,7 +1005,7 @@ function newGame(){
     crisisLoss:0, kindness:false, lastStand:0, lastStandUsed:false, miracle:false,
     rushed:{noon:false,dinner:false}, title:'',
     mem:{wear:{}, reported:false, burnRecent:0, leakRecent:0, ratFed:false, paparazziDone:false},
-    tables:TABLE_POS.map(p=>({x:p.x,y:p.y,customer:null,plates:0,plateT:0,warned:false,sparkT:0})),
+    tables:TABLE_POS.map(p=>({x:p.x,y:p.y,customer:null,plates:0,plateT:0,warned:false,sparkT:0,clearFlash:0})),
     stations:STATION_DEF.map(s=>({id:s.id,label:s.label,x:s.x,y:648,state:'idle',prog:0,ready:null,readyAge:0,wob:0,fixT:0})),
     tools:TOOLS_DEF.map(t=>({kind:t.kind,hx:t.hx,hy:t.hy,x:t.hx,y:t.hy,drag:false,retT:1,rx:t.hx,ry:t.hy})),
     bin:{x:BIN.x,y:BIN.y,fill:0,cap:4,emptying:0,overT:0,drag:false,dx:BIN.x,dy:BIN.y},
@@ -1218,7 +1218,7 @@ function serveFood(c,foodKind){
   const fast=c.orderT<6.5;
   if(fast){
     G.flow=Math.min(1,G.flow+0.16); // riding the wave
-    G.combo++; G.comboT=8; G.maxCombo=Math.max(G.maxCombo,G.combo);
+    G.combo++; G.comboT=12; G.maxCombo=Math.max(G.maxCombo,G.combo); // extended window -- one slow moment shouldn't wipe a hot streak
     if(G.combo>=2){ floater(c.x,c.y-84,'COMBO ×'+G.combo,'#ffd93d',24); A.sfx('combo'); }
     if(G.combo>=5) unlockAch('combo');
     if(G.combo===5) confetti(c.x,c.y-40,10);
@@ -1240,7 +1240,12 @@ function serveFood(c,foodKind){
     }
     if(G.combo>=15&&G.combo%5===0){ shake(3,0.15); confetti(c.x,c.y-40,12); note('⚡ ×'+G.combo+' — the room is electric!','#ffd93d'); }
     if(G.combo%3===0) triggerCalm(); // rhythm becomes recovery
-  } else G.combo=0;
+  } else {
+    G.combo=0;
+    // regular (slow) serve — still register a modest reward so the tap doesn't feel ignored
+    sparkle(c.x,c.y-40,'rgba(255,220,120,0.7)',3);
+    floater(c.x,c.y-58,'ok','rgba(255,255,255,0.6)',13);
+  }
   const saved=patPre/c.maxPat<0.18; // saved at the brink
   c.perfect=fast && c.orderT<4.6 && patPre/c.maxPat>0.6;
   if(c.perfect){
@@ -1613,6 +1618,7 @@ function lunchRush(label){
 let pointer={x:0,y:0,down:false,sx:0,sy:0,moved:0};
 let drag=null; // {type, ref, food?, offx, offy}
 let dragVis={x:0,y:0}; // lagged visual position for dragged items
+let dragVel={x:0,y:0}; // for velocity-adaptive lerp
 let tweens=[]; // spring-back animations for foods
 const uiRects=[]; // rebuilt each frame by drawBtn
 
@@ -1628,6 +1634,7 @@ cv.addEventListener('pointercancel',e=>{onUp(evtPos(e));},{passive:false});
 
 function onDown(p){
   pointer.down=true; pointer.x=p.x;pointer.y=p.y; pointer.sx=p.x;pointer.sy=p.y; pointer.moved=0;
+  if(G&&screen==='game')G.lastInputT=G.t;
   if(screen!=='game'||paused||!G||G.over) return;
   p=s2w(p);
   drag=pickDraggable(p.x,p.y);
@@ -1678,6 +1685,12 @@ function gameTap(x,y){
 function tapStation(s){
   if(s.state==='broken'){ floater(s.x,622,'BROKEN!','#ffab4c',18); A.sfx('buzz'); return; }
   if(fireOn('station',s)){ floater(s.x,622,'ON FIRE!','#ff5a3c',18); A.sfx('buzz'); return; }
+  if(s.state==='cook' && s.prog<0.15){ // early-cancel window (~1s) -- undo an accidental start, no penalty
+    s.state='idle'; s.prog=0;
+    A.sfx('click'); floater(s.x,596,'cancelled','rgba(255,255,255,0.7)',13);
+    puff(s.x,586,'rgba(255,255,255,0.5)',3,50,3,0.3);
+    return;
+  }
   if(s.state==='idle'){
     s.state='cook'; s.prog=0; A.sfx(s.id==='drinks'?'pour':'sizzle');
     if(Math.random()<0.8)sparkle(s.x,584,'#ffd93d',2);
@@ -1731,12 +1744,15 @@ function resolveDrop(d,x,y){
       }
     }
     for(const c of G.customers){
-      if((c.state==='waiting') && (dist(x,y,c.x,c.y)<60 || (c.table&&dist(x,y,c.table.x,c.table.y)<58))){
+      if((c.state==='waiting') && (dist(x,y,c.x,c.y)<68 || (c.table&&dist(x,y,c.table.x,c.table.y)<68))){
         if(c.orders.includes(kind)){ s.ready=null; if(s.state!=='broken') s.state='idle'; c.orderT_last=c.orderT; serveFood(c,kind); return; }
         else { floater(c.x,c.y-58,'Not my order!','#ff8a8a',16); A.sfx('buzz'); return; }
       }
     }
-    A.sfx('buzz'); // snaps back visually (food stays on station)
+    // dropped in empty space — softer feedback, food goes back to station cleanly, no punitive buzz
+    A.sfx('pop');
+    puff(s.x,580,'rgba(255,255,255,0.6)',3,50,2,0.3);
+    sparkle(s.x,580,'rgba(255,255,255,0.8)',3);
   }
   else if(d.type==='plates'){
     if(dist(x,y,G.bin.x,G.bin.y)<58){
@@ -1744,7 +1760,12 @@ function resolveDrop(d,x,y){
       if(G.bin.fill>=G.bin.cap){ floater(G.bin.x,G.bin.y-50,'BIN FULL!','#ff8a8a',16); A.sfx('buzz'); return; }
       d.ref.plates=0; d.ref.plateT=0; d.ref.warned=false; G.bin.fill++; A.sfx('thud');
       puff(G.bin.x,G.bin.y-24,'#9aa7b5',5,60,4,0.4);
-      d.ref.sparkT=1.0; sparkle(d.ref.x,d.ref.y-8,'#bff0ff',5);
+      // TABLE CLEAR DELIGHT: a satisfying green flash on the table + coin burst + bigger sparkle
+      d.ref.sparkT=1.0; sparkle(d.ref.x,d.ref.y-8,'#bff0ff',9);
+      d.ref.clearFlash=0.6; // fresh table glow that fades over 0.6s
+      coinBurst(d.ref.x,d.ref.y-12,3);
+      hap(10); // tactile confirmation matching the serve
+      A.sfx('ding');
       G.money+=3; floater(d.ref.x,d.ref.y-24,'+$3','#7cf2c0',13);
       noteGood(G.bin.x,G.bin.y); relief(d.ref.x,d.ref.y); markCleanAction(d.ref.x,d.ref.y,'plates');
       if(!S.data.tut.plates){S.data.tut.plates=true;S.save();}
@@ -1769,7 +1790,7 @@ function resolveDrop(d,x,y){
       if(!used) for(const r of G.rats){ if(dist(x,y,r.x,r.y)<50){ scareRat(r); used=true; break; } }
     }
     else if(tl.kind==='ext'){
-      for(const f of G.fires){ if(dist(x,y,f.x,f.y)<56){ extinguishFire(f); used=true; break; } }
+      for(const f of G.fires){ if(dist(x,y,f.x,f.y)<68){ extinguishFire(f); used=true; break; } }
     }
     else if(tl.kind==='wrench'){
       for(const s of G.stations){ if(s.state==='broken' && Math.abs(x-s.x)<60 && y>556 && y<680){
@@ -2011,7 +2032,8 @@ function director(dt){
   const broken=G.stations.filter(s=>s.state==='broken').length;
   let p= queueN*0.07 + urgent*0.13 + G.fires.length*0.28 + G.rats.filter(r=>!r.ally).length*0.13
        + broken*0.11 + G.puddles.length*0.05 + (G.bin.fill>=G.bin.cap?0.14:0)
-       + Math.min(3,plates)*0.07 + (G.box?0.09:0) // dirty plates now meaningfully contribute + (G.blackout>0?0.2:0) + Math.min(0.22,t/700)
+       + Math.min(3,plates)*0.07 + (G.box?0.09:0)
+       + (G.blackout>0?0.2:0) + Math.min(0.22,t/700)
        + G.smoke*0.15 + G.messes.length*0.06 + (G.viralT>0?0.12:0) + Math.min(0.1,G.badReviews*0.02);
   if(G.lastStand>0)p=Math.max(p,0.9); // the finale plays at full volume
   G.panic=clamp(p,0,1);
@@ -2044,7 +2066,7 @@ function updateGame(dt){
   G.chatCd-=dt;
   if(G.calmPulse>0){ G.calmPulse+=dt*1.6; if(G.calmPulse>1)G.calmPulse=0; }
   if(G.panicSm>0.55)G.wasPanicked=true; // (panicRate applied where panic accumulates, see below)
-  G.flow=Math.max(0,G.flow-dt*0.035);
+  G.flow=Math.max(0,G.flow-dt*0.055); // faster decay -- keeping flow up requires steady work, feels earned
   G.glow=Math.max(G.glow-dt*0.25,G.flow*0.45); // success is visible
   if(G.flow>0.6&&Math.random()<dt*3&&parts.length<MAXP)
     parts.push({x:rnd(30,450),y:rnd(200,520),vx:rnd(-6,6),vy:rnd(-26,-14),g:-4,s:rnd(1.6,3),l:0,ml:rnd(0.8,1.4),c:'rgba(255,220,130,0.55)',shape:'c'});
@@ -2784,6 +2806,16 @@ function updateGame(dt){
   } else if(!S.data.tut.inspect && G.inspector){
     G.hint={x:G.inspector.x,y:G.inspector.y-30,s:'Inspector! Keep things clean & fires out'};
     S.data.tut.inspect=true; S.save();
+  } else if(G.t-(G.lastInputT||0)>8 && S.data.tut.cook && S.data.tut.serve){
+    // subtle nudge for experienced players who've stalled -- points to whatever needs doing most
+    const readySt=G.stations.find(st=>st.ready&&st.ready!=='burnt'&&st.ready!=='melted');
+    const impatient=G.customers.find(c=>c.state==='waiting'&&c.patience/c.maxPat<0.35);
+    const dirtyT=G.tables.find(t=>t.plates>0);
+    const idleSt=G.stations.find(st=>st.state==='idle');
+    if(readySt) G.hint={x:readySt.x,y:540,s:'Food is getting cold!'};
+    else if(impatient) G.hint={x:impatient.x,y:impatient.y-70,s:'Customer is losing patience!'};
+    else if(dirtyT) G.hint={x:dirtyT.x,y:dirtyT.y-10,s:'Dirty plates need clearing'};
+    else if(idleSt&&G.customers.some(c=>c.state==='waiting')) G.hint={x:idleSt.x,y:632,s:'Tap to cook'};
   }
 }
 
@@ -2952,6 +2984,17 @@ function drawTable(t){
   cx.fillStyle=th.accent; rr(t.x-44,t.y-26,88,58,16); cx.fill();
   cx.lineWidth=4.4; cx.strokeStyle=th.ink; cx.stroke();
   cx.fillStyle='rgba(255,255,255,0.35)'; rr(t.x-36,t.y-18,72,14,8); cx.fill();
+  // TABLE CLEAR flash -- brief green glow when plates are bussed, fades over ~0.6s
+  if(t.clearFlash>0){
+    t.clearFlash=Math.max(0,t.clearFlash-0.017);
+    const k=clamp(t.clearFlash/0.6,0,1);
+    cx.save();cx.globalAlpha=k*0.9;
+    cx.fillStyle='rgba(124,242,192,0.5)'; rr(t.x-44,t.y-26,88,58,16); cx.fill();
+    cx.lineWidth=3+k*3; cx.strokeStyle='#7cf2c0'; rr(t.x-44,t.y-26,88,58,16); cx.stroke();
+    cx.restore();
+    // sparkle burst as it fades
+    if(Math.random()<k*0.6) sparkle(t.x+rnd(-30,30),t.y-8+rnd(-14,14),'#bff0ff',1);
+  }
   if(t.plates>0){ // glow = interactable: a dirty plate is waiting to be bussed
     const wob=Math.sin(G.t*3+t.x)*1.5;
     const pulse=0.12+0.07*Math.sin(perfT*2.6+t.x);
@@ -3273,7 +3316,11 @@ function drawCustomer(c){
     const by=y-58;
     const r=clamp(c.patience/c.maxPat,0,1);
     const col= r>0.55?'#7cd67c': r>0.28?'#ffd24d':'#ff5a5f';
-    const pulse=r<0.28?1+Math.sin(G.t*10)*0.06:1;
+    // heartbeat: pulse frequency and amplitude both accelerate as patience approaches zero
+    const alarm=r<0.28?clamp(1-r/0.28,0,1):0; // 0 above 0.28, ramps to 1 at 0
+    const beatFreq=8+alarm*14; // 8Hz at 0.28, 22Hz near zero
+    const beatAmp=0.06+alarm*0.08; // 0.06 at 0.28, 0.14 near zero
+    const pulse=alarm>0?1+Math.sin(G.t*beatFreq)*beatAmp:1;
     cx.save();cx.translate(x,by);cx.scale(pulse,pulse);
     cx.fillStyle='#fff'; cx.beginPath();cx.arc(0,0,22+(c.orders.length>1?6:0),0,TAU);cx.fill();
     cx.lineWidth=3.4;cx.strokeStyle=TH().ink;cx.stroke();
@@ -3319,8 +3366,22 @@ function drawStation(s){
   txtO(s.label,0,30,13,'#fff',th.ink);
   // progress
   if(s.state==='cook'){
+    const prog=clamp(s.prog,0,1);
+    // background bar (small, keeps precise progress reading)
     cx.fillStyle='rgba(0,0,0,0.25)'; rr(-40,10,80,10,5); cx.fill();
-    cx.fillStyle='#ffd93d'; rr(-40,10,80*clamp(s.prog,0,1),10,5); cx.fill();
+    cx.fillStyle='#ffd93d'; rr(-40,10,80*prog,10,5); cx.fill();
+    // big circular ring around station -- readable at a glance from anywhere on screen
+    const nearDone=prog>0.82;
+    const flash=nearDone?1+Math.sin(G.t*14)*0.06:1; // pulse when nearly done
+    cx.save();
+    cx.lineWidth=4;
+    cx.strokeStyle='rgba(0,0,0,0.18)';
+    cx.beginPath();cx.arc(0,0,50,0,TAU);cx.stroke();
+    cx.lineWidth=4.5*flash;
+    cx.strokeStyle=nearDone?'#ffd42f':'#ffd93d';
+    cx.lineCap='round';
+    cx.beginPath();cx.arc(0,0,50,-Math.PI/2,-Math.PI/2+TAU*prog);cx.stroke();
+    cx.restore();
   }
   if(s.state==='fixing'){
     cx.fillStyle='rgba(0,0,0,0.25)'; rr(-40,10,80,10,5); cx.fill();
@@ -3442,7 +3503,10 @@ function drawRat(r){
 function drawBin(){
   const b=G.bin;
   const x=b.drag?b.dx:b.x, y=b.drag?b.dy:b.y;
-  cx.save();cx.translate(x,y);
+  // anticipation wobble: bin trembles slightly when one slot from full
+  const preFull=b.fill>=b.cap-1&&b.fill<b.cap;
+  const trem=preFull?Math.sin(perfT*22)*1.2:0;
+  cx.save();cx.translate(x+trem,y);
   if(b.emptying>0){ cx.globalAlpha=0.35; }
   cx.fillStyle='rgba(0,0,0,0.18)';cx.beginPath();cx.ellipse(0,38,26,7,0,0,TAU);cx.fill();
   cx.fillStyle='#78909c';
@@ -3465,6 +3529,14 @@ function drawBin(){
       cx.fillStyle=TH().ink;cx.beginPath();cx.arc(Math.cos(a)*22,-38+Math.sin(a*1.7)*10,2,0,TAU);cx.fill();
     }
     if(Math.floor(G.t*5)%2===0) txtO('FULL!',0,-52,14,'#ff8a8a',TH().ink);
+  } else if(b.fill>=b.cap-1 && b.fill>0){
+    // ANTICIPATION: one slot left -- yellow tremor + "1 more" cue
+    // this prevents the surprise "wait it's full?" moment
+    cx.save();cx.globalAlpha=0.5+0.3*Math.sin(perfT*6);
+    cx.strokeStyle='#ffd93d'; cx.lineWidth=3;
+    cx.beginPath();cx.moveTo(-26,-24);cx.lineTo(26,-24);cx.lineTo(20,38);cx.lineTo(-20,38);cx.closePath();cx.stroke();
+    cx.restore();
+    if(Math.floor(G.t*4)%2===0) txtO('1 more',0,-52,12,'#ffd93d',TH().ink);
   }
   cx.globalAlpha=1;
   // fill pips
@@ -3531,6 +3603,28 @@ function drawTools(){
     if(home){ txt(tl.kind==='mop'?'MOP':tl.kind==='ext'?'FIRE':'FIX',tl.hx,tl.hy+52,11,'rgba(255,255,255,0.5)'); }
     const wob=tl.drag?Math.sin(G.t*16)*0.12:0;
     const sc=tl.drag?1.18:1;
+    // AIM ASSIST: dragging extinguisher shows an aim line to the nearest fire
+    if(tl.drag&&tl.kind==='ext'&&G.fires.length){
+      let nearest=null,nd=1e9;
+      for(const f of G.fires){ const d=dist(tl.x,tl.y,f.x,f.y); if(d<nd){nd=d;nearest=f;} }
+      if(nearest){
+        const inRange=nd<160; // only show when close enough for the line to help
+        if(inRange){
+          cx.save();
+          cx.setLineDash([5,6]);
+          cx.lineWidth=3;
+          cx.strokeStyle=nd<68?'rgba(124,242,192,0.85)':'rgba(255,220,120,0.7)'; // green when in hit range
+          cx.beginPath();cx.moveTo(tl.x,tl.y-14);cx.lineTo(nearest.x,nearest.y-6);cx.stroke();
+          cx.setLineDash([]);
+          // small target reticle over the fire
+          const pulse=1+Math.sin(perfT*10)*0.12;
+          cx.lineWidth=3;
+          cx.strokeStyle=nd<68?'#7cf2c0':'#ffd93d';
+          cx.beginPath();cx.arc(nearest.x,nearest.y-6,22*pulse,0,TAU);cx.stroke();
+          cx.restore();
+        }
+      }
+    }
     cx.save();
     if(tl.drag){ cx.shadowColor='rgba(0,0,0,0.4)'; cx.shadowBlur=12; cx.shadowOffsetY=8; }
     drawTool(tl.kind,tl.x,tl.y,sc,wob);
@@ -3575,7 +3669,7 @@ function drawHUD(){
   comboChip=0;
   if(G.combo>=2&&G.comboT>0){
     comboChip=34;
-    const k=G.comboT/8, p=1+Math.sin(G.t*10)*0.04;
+    const k=G.comboT/12, p=1+Math.sin(G.t*10)*0.04;
     cx.save();cx.translate(W-58,80);cx.scale(p,p);
     cx.fillStyle='rgba(24,26,52,0.85)'; rr(-52,-14,104,28,14);cx.fill();
     txtO('×'+G.combo,-26,0,17,'#ffd93d',th.ink);
@@ -4957,11 +5051,18 @@ function renderGame(still){
   for(const f of G.fires)drawFire(f);
   drawParts();
   drawFloaters();
-  // dragged food ghost — lags and tilts with movement
+  // dragged food ghost — lags and tilts with movement, snappier on fast drags
   if(drag&&(drag.type==='food'||drag.type==='plates')){
     const wpt=s2w(pointer);
-    dragVis.x+=(wpt.x-dragVis.x)*0.42;
-    dragVis.y+=(wpt.y-32-dragVis.y)*0.42; // preview lifts above the finger so player can see what they're moving
+    // velocity-adaptive lerp: 0.42 base, boosted up to 0.72 during fast pointer movement
+    // this keeps precision on slow placements but eliminates lag on quick diagonal serves
+    const targetX=wpt.x, targetY=wpt.y-32;
+    const dxToTarget=targetX-dragVis.x, dyToTarget=targetY-dragVis.y;
+    const distToTarget=Math.hypot(dxToTarget,dyToTarget);
+    const speedBoost=clamp((distToTarget-40)/120, 0, 1); // 0 near-target, 1 far
+    const lerp=0.42+speedBoost*0.30;
+    dragVis.x+=dxToTarget*lerp;
+    dragVis.y+=dyToTarget*lerp;
     const tilt=clamp((wpt.x-dragVis.x)*0.045,-0.4,0.4);
     cx.save();cx.shadowColor='rgba(0,0,0,0.4)';cx.shadowBlur=14;cx.shadowOffsetY=10;
     cx.translate(dragVis.x,dragVis.y);cx.rotate(tilt);
@@ -5106,21 +5207,36 @@ function drawDrama(){
 function highlightTargets(){
   const pulse=1+Math.sin(perfT*8)*0.08;
   cx.lineWidth=4; cx.setLineDash([8,7]);
-  cx.strokeStyle='#ffd93d';
   if(drag.type==='food'&&drag.food!=='burnt'&&drag.food!=='melted'){
-    for(const c of G.customers)if(c.state==='waiting'&&c.orders.includes(drag.food)){
-      cx.beginPath();cx.arc(c.x,c.y-6,44*pulse,0,TAU);cx.stroke();
+    // triage colors: coral for lowest-patience, gold for normal
+    // find the customer wanting this food with the lowest patience so we can hue-map relative
+    const matches=G.customers.filter(c=>c.state==='waiting'&&c.orders.includes(drag.food));
+    for(const c of matches){
+      const pr=c.patience/c.maxPat;
+      const urgent=pr<0.35;
+      const critical=pr<0.18;
+      // stronger stroke + coral for critical, orange for urgent, gold for calm
+      cx.strokeStyle = critical?'#ff5a5f' : urgent?'#ff9d3c' : '#ffd93d';
+      cx.lineWidth = critical?5.5 : urgent?4.6 : 4;
+      // extra amplitude on urgent pulses
+      const p = critical?(1+Math.sin(perfT*14)*0.14) : urgent?(1+Math.sin(perfT*10)*0.11) : pulse;
+      cx.beginPath();cx.arc(c.x,c.y-6,44*p,0,TAU);cx.stroke();
     }
+    cx.strokeStyle='#ffd93d'; cx.lineWidth=4; // reset for other branches below
   } else if(drag.type==='plates'||(drag.type==='food'&&(drag.food==='burnt'||drag.food==='melted'))){
+    cx.strokeStyle='#ffd93d';
     cx.beginPath();cx.arc(G.bin.x,G.bin.y,52*pulse,0,TAU);cx.stroke();
   } else if(drag.type==='tool'){
+    cx.strokeStyle='#ffd93d';
     const k=drag.ref.kind;
     if(k==='ext')for(const f of G.fires){cx.beginPath();cx.arc(f.x,f.y-6,48*pulse,0,TAU);cx.stroke();}
     if(k==='mop'){for(const p of G.puddles){cx.beginPath();cx.arc(p.x,p.y,46*pulse,0,TAU);cx.stroke();}for(const m of G.messes){cx.beginPath();cx.arc(m.x,m.y,40*pulse,0,TAU);cx.stroke();}for(const r of G.rats){cx.beginPath();cx.arc(r.x,r.y,42*pulse,0,TAU);cx.stroke();}}
     if(k==='wrench')for(const s of G.stations)if(s.state==='broken'){cx.beginPath();cx.arc(s.x,648,62*pulse,0,TAU);cx.stroke();}
   } else if(drag.type==='box'){
+    cx.strokeStyle='#ffd93d';
     rr(PANTRY.x-4,PANTRY.y-4,PANTRY.w+8,PANTRY.h+8,16);cx.stroke();
   } else if(drag.type==='treat'&&drag.ref.target&&G.customers.includes(drag.ref.target)){
+    cx.strokeStyle='#ffd93d';
     cx.beginPath();cx.arc(drag.ref.target.x,drag.ref.target.y,48*pulse,0,TAU);cx.stroke();
   }
   cx.setLineDash([]);
