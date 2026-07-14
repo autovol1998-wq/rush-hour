@@ -985,7 +985,7 @@ function newGame(){
   const maxH=5+Math.min(2,S.data.prestige||0);
   G={
     t:0, money:0, hearts:maxH, maxHearts:maxH, over:false, endT:0, runMod:useMod, hardMode:hard,
-    combo:0, comboT:0, maxCombo:0, lastInputT:0,
+    combo:0, comboT:0, maxCombo:0, lastInputT:0, survivalEvent:null, survivalEventCd:rnd(28,42), survivalEventCount:0, lastSurvivalEvent:null, powerFlickerT:0,
     served:0, angry:0, firesOut:0, disasters:0,
     panic:0, panicSm:0,
     customers:[], rats:[], puddles:[], fires:[], stories:[], cats:[], birds:[],
@@ -995,7 +995,7 @@ function newGame(){
     spawnT:1.6, eventT:40, lastEvent:'', rushCd:0, inspCd:0,
     event:null, eventsUsed:[], eventCd:8, firstEventAt:rnd(45,70), paradeCd:rnd(70,140),
     smoke:0, badReviews:0, messes:[], viralT:0, morale:0,
-    flow:0, day:1, calmPulse:0, freshCd:0, wasPanicked:false, hitstop:0, moneyShown:0, chefWipe:0,
+    flow:0, day:1, calmPulse:0, freshCd:0, wasPanicked:false, hitstop:0, moneyShown:0, chefWipe:0, resumeCountdown:0, lastServeHitstopT:-99,
     lineJamCd:0, dirtyRatCd:0, pressureTipCd:0, kikiToastCd:0,
     /* PHASE 3: polish counters only — no balance changes, just better feel and feedback */
     perfectN:0, clutchN:0, cleanN:0, cleanStreak:0, lastCleanAt:-99,
@@ -1267,7 +1267,7 @@ function serveFood(c,foodKind){
     recordMoment('A one-second save kept the shift alive.',4);
   }
   c.state='eat'; c.eatT=c.def.eat; c.mood='happy';
-  c.squash=1; G.hitstop=Math.max(G.hitstop,0.05*SETT().hit); shake(2,0.09); hap(9);
+  c.squash=1; if(G.t-(G.lastServeHitstopT||0)>0.4){ G.hitstop=Math.max(G.hitstop,0.05*SETT().hit); G.lastServeHitstopT=G.t; } shake(2,0.09); hap(9);
   puff(c.x,c.y-14,'rgba(255,255,255,0.85)',6,140,3,0.3);
   if(c.table)c.table.bump=1;
   G.glow=Math.min(1,(G.glow||0)+0.3); // the room warms up when service flows
@@ -1614,6 +1614,359 @@ function lunchRush(label){
   },650);
 }
 
+/* ================================ SURVIVAL EVENTS ================================
+   Replaces time-of-day scheduling. Random pressure events during endless survival.
+   warning → short delay → chaos → auto-finish.
+================================================================================== */
+const SURVIVAL_EVENTS = {
+  rushWave:        {id:'rushWave',        name:'Rush Wave',        warning:'Rush incoming...',              color:'#ffb347', weight:18},
+  officeBreak:     {id:'officeBreak',     name:'Office Break',     warning:'Office break incoming...',      color:'#90a4bd', weight:13},
+  kikiRaid:        {id:'kikiRaid',        name:'Kiki Raid',        warning:'Scratching in the walls...',    color:'#b78bff', weight:14},
+  deliveryJam:     {id:'deliveryJam',     name:'Delivery Jam',     warning:'Delivery van outside...',       color:'#c98a4b', weight:12},
+  fireDrill:       {id:'fireDrill',       name:'Fire Drill',       warning:'Something smells hot...',       color:'#ff8a5c', weight:12},
+  machineBreakdown:{id:'machineBreakdown',name:'Machine Breakdown',warning:'A machine is rattling...',      color:'#ffab4c', weight:11},
+  inspectorWalkIn: {id:'inspectorWalkIn', name:'Inspector Walk-In',warning:'Clipboard outside...',          color:'#7cd67c', weight:9},
+  schoolTrip:      {id:'schoolTrip',      name:'School Trip',      warning:'Tiny footsteps incoming...',    color:'#6ec6ff', weight:11},
+  vipDoubleBooking:{id:'vipDoubleBooking',name:'VIP Double Booking',warning:'VIP reservation conflict...',   color:'#ffd24d', weight:7},
+  kikiChaosParade: {id:'kikiChaosParade', name:'Kiki Chaos Parade', warning:'Tiny footsteps lining up...',   color:'#b78bff', weight:6},
+  powerFlicker:    {id:'powerFlicker',    name:'Power Flicker',     warning:'Lights are flickering...',      color:'#6b72a8', weight:7}
+};
+
+function survivalEventInterval(){
+  const t = G.t;
+  if(t < 60)  return rnd(38,52);
+  if(t < 150) return rnd(30,44);
+  if(t < 300) return rnd(24,36);
+  return rnd(20,32);
+}
+
+function canStartSurvivalEvent(){
+  if(!G || G.over) return false;
+  if(G.survivalEvent) return false;
+  if(G.lastStand > 0) return false;
+  if(G.hearts <= 1) return false;
+  if(G.panicSm > 0.82) return false;
+  if(G.fires.length >= 2) return false;
+  const queueN = G.customers.filter(c => c.state === 'queue').length;
+  if(queueN >= QUEUE.length) return false;
+  return true;
+}
+
+function survivalEventAllowed(id){
+  const queueN = G.customers.filter(c => c.state === 'queue').length;
+  const broken = G.stations.filter(s => s.state === 'broken').length;
+  const activeRats = G.rats.filter(r => !r.ally && r.state !== 'flee' && r.state !== 'parade').length;
+  if(id === 'inspectorWalkIn' && G.inspector) return false;
+  if(id === 'fireDrill' && G.fires.length > 0) return false;
+  if(id === 'machineBreakdown' && broken >= 2) return false;
+  if(id === 'deliveryJam' && G.box) return false;
+  if(id === 'kikiRaid' && activeRats >= 2) return false;
+  if(id === 'officeBreak' && queueN > 2) return false;
+  if(id === 'schoolTrip' && queueN > 2) return false;
+  // NEW EVENTS
+  if(id === 'vipDoubleBooking'){
+    if(G.fires.length > 0) return false;
+    if(queueN > 1) return false;
+    if(broken >= 2) return false;
+    if(G.viralT > 0) return false;
+    if(G.box) return false;
+  }
+  if(id === 'kikiChaosParade'){
+    if(activeRats >= 2) return false;
+    if(G.fires.length >= 2) return false;
+    if(G.panicSm > 0.7) return false;
+  }
+  if(id === 'powerFlicker'){
+    if(G.blackout > 0) return false;
+    if(G.fires.length >= 2) return false;
+    if(G.panicSm > 0.78) return false;
+  }
+  return true;
+}
+
+function pickSurvivalEvent(){
+  let ids = Object.keys(SURVIVAL_EVENTS);
+  ids = ids.filter(id => id !== G.lastSurvivalEvent);
+  ids = ids.filter(id => survivalEventAllowed(id));
+  if(!ids.length) ids = Object.keys(SURVIVAL_EVENTS).filter(id => id !== G.lastSurvivalEvent && survivalEventAllowed(id));
+  if(!ids.length) ids = Object.keys(SURVIVAL_EVENTS).filter(id => survivalEventAllowed(id));
+  if(!ids.length) ids = Object.keys(SURVIVAL_EVENTS);
+  let total = 0;
+  for(const id of ids) total += SURVIVAL_EVENTS[id].weight;
+  let r = Math.random() * total;
+  for(const id of ids){
+    r -= SURVIVAL_EVENTS[id].weight;
+    if(r <= 0) return id;
+  }
+  return ids[0];
+}
+
+function startRandomSurvivalEvent(){
+  const id = pickSurvivalEvent();
+  startSurvivalEvent(id);
+}
+
+function startSurvivalEvent(id){
+  const ev = SURVIVAL_EVENTS[id];
+  if(!ev) return;
+  G.survivalEvent = { id, t:0, phase:'warning', fired:false, spawned:0, pulses:0, dur:0, target:null };
+  G.lastSurvivalEvent = id;
+  G.survivalEventCount++;
+  banner(ev.warning, ev.color, typeof NOTE_PRIORITY !== 'undefined' ? NOTE_PRIORITY.HIGH : undefined, 'survival-'+id+'-warning');
+  addStory(ev.name + ' is coming.', 1);
+}
+
+function finishSurvivalEvent(){
+  if(!G || !G.survivalEvent) return;
+  G.survivalEvent = null;
+  G.survivalEventCd = survivalEventInterval();
+  if(G.hearts > 0){
+    note('Survived the event', '#7cf2c0', typeof NOTE_PRIORITY !== 'undefined' ? NOTE_PRIORITY.LOW : undefined, 'survival-event-end');
+  }
+}
+
+function updateSurvivalEvents(dt){
+  if(!G || G.over) return;
+  if(G.survivalEvent){
+    updateCurrentSurvivalEvent(dt);
+    return;
+  }
+  G.survivalEventCd -= dt;
+  if(G.survivalEventCd <= 0){
+    if(canStartSurvivalEvent()){
+      startRandomSurvivalEvent();
+    } else {
+      G.survivalEventCd = rnd(5,10);
+    }
+  }
+}
+
+function updateCurrentSurvivalEvent(dt){
+  const e = G.survivalEvent;
+  if(!e) return;
+  e.t += dt;
+  if(e.phase === 'warning' && e.t >= 2.8){
+    e.phase = 'active';
+    e.t = 0;
+    triggerSurvivalEvent(e.id);
+  }
+  updateActiveSurvivalEvent(dt);
+}
+
+function triggerSurvivalEvent(id){
+  const e = G.survivalEvent;
+  const ev = SURVIVAL_EVENTS[id];
+  const shortLabels = {
+    rushWave:'RUSH WAVE!', officeBreak:'OFFICE BREAK!', kikiRaid:'KIKI RAID!',
+    deliveryJam:'DELIVERY JAM!', fireDrill:'FIRE DRILL!', machineBreakdown:'MACHINE BROKE!',
+    inspectorWalkIn:'INSPECTOR!', schoolTrip:'SCHOOL TRIP!'
+  };
+  banner(shortLabels[id] || ev.name, ev.color, typeof NOTE_PRIORITY !== 'undefined' ? NOTE_PRIORITY.HIGH : undefined, 'survival-active-'+id);
+
+  if(id === 'rushWave')         e.dur = 9;
+  else if(id === 'officeBreak') e.dur = 8;
+  else if(id === 'kikiRaid')    e.dur = 12;
+  else if(id === 'deliveryJam') e.dur = 12;
+  else if(id === 'fireDrill')   e.dur = 3.2;
+  else if(id === 'machineBreakdown') e.dur = 2.7;
+  else if(id === 'inspectorWalkIn')  e.dur = 0.6;
+  else if(id === 'schoolTrip')  e.dur = 8;
+  else if(id === 'vipDoubleBooking') e.dur = 8;
+  else if(id === 'kikiChaosParade')  e.dur = 8.5;
+  else if(id === 'powerFlicker')     e.dur = 5.5;
+
+  // event-specific one-shot preparation
+  if(id === 'fireDrill' || id === 'machineBreakdown'){
+    const candidates = G.stations.filter(s => s.state !== 'broken' && !fireOn('station', s));
+    if(candidates.length){
+      e.target = (typeof maxWearStation === 'function' ? maxWearStation() : null) || pick(candidates);
+      if(!candidates.includes(e.target)) e.target = pick(candidates);
+      if(id === 'fireDrill') floater(e.target.x, e.target.y-70, 'smoking...', '#ff8a5c', 15);
+      else floater(e.target.x, e.target.y-70, 'rattling...', '#ffab4c', 15);
+      e.target.wob = 1;
+    } else {
+      finishSurvivalEvent();
+      return;
+    }
+  }
+  if(id === 'deliveryJam'){
+    if(typeof spawnBox === 'function') spawnBox();
+  }
+  if(id === 'inspectorWalkIn'){
+    if(typeof spawnInspector === 'function') spawnInspector();
+  }
+  if(id === 'vipDoubleBooking'){
+    // banner + prep -- update loop spawns customers
+    A.sfx('bell');
+  }
+  if(id === 'kikiChaosParade'){
+    A.sfx('squeak');
+  }
+  if(id === 'powerFlicker'){
+    // short controlled blackout for atmosphere; gameplay stays readable
+    G.powerFlickerT = 5.5;
+    G.blackout = Math.max(G.blackout || 0, 3.5);
+    G.blackMax = Math.max(G.blackMax || 0, 3.5);
+    A.sfx('crash');
+    for(const st of G.stations) st.wob = Math.max(st.wob || 0, 0.4);
+  }
+}
+
+function updateActiveSurvivalEvent(dt){
+  const e = G.survivalEvent;
+  if(!e || e.phase !== 'active') return;
+  if(e.id === 'rushWave')            updateRushWaveEvent(dt, e);
+  else if(e.id === 'officeBreak')    updateOfficeBreakEvent(dt, e);
+  else if(e.id === 'kikiRaid')       updateKikiRaidEvent(dt, e);
+  else if(e.id === 'deliveryJam')    updateDeliveryJamEvent(dt, e);
+  else if(e.id === 'fireDrill')      updateFireDrillEvent(dt, e);
+  else if(e.id === 'machineBreakdown') updateMachineBreakdownEvent(dt, e);
+  else if(e.id === 'inspectorWalkIn')  updateInspectorWalkInEvent(dt, e);
+  else if(e.id === 'schoolTrip')     updateSchoolTripEvent(dt, e);
+  else if(e.id === 'vipDoubleBooking') updateVipDoubleBookingEvent(dt, e);
+  else if(e.id === 'kikiChaosParade')  updateKikiChaosParadeEvent(dt, e);
+  else if(e.id === 'powerFlicker')     updatePowerFlickerEvent(dt, e);
+}
+
+function updateRushWaveEvent(dt, e){
+  e.pulseT = (e.pulseT || 0) - dt;
+  if(e.pulseT <= 0 && e.spawned < 5){
+    const c = spawnCustomer();
+    if(c) e.spawned++;
+    e.pulseT = 1.2;
+  }
+  if(e.spawned >= 5 || e.t >= e.dur) finishSurvivalEvent();
+}
+
+function updateOfficeBreakEvent(dt, e){
+  e.pulseT = (e.pulseT || 0) - dt;
+  if(e.pulseT <= 0 && e.spawned < 4){
+    const c = spawnCustomer('biz');
+    if(c) e.spawned++;
+    e.pulseT = 1.5;
+  }
+  if(e.spawned >= 4 || e.t >= e.dur) finishSurvivalEvent();
+}
+
+function updateKikiRaidEvent(dt, e){
+  e.pulseT = (e.pulseT || 0) - dt;
+  const activeRats = G.rats.filter(r => !r.ally).length;
+  if(e.pulseT <= 0 && e.spawned < 3 && activeRats < 2){
+    spawnRat();
+    e.spawned++;
+    e.pulseT = 2.3;
+  }
+  if(e.spawned >= 3 && e.t >= e.dur) finishSurvivalEvent();
+  else if(e.t >= e.dur) finishSurvivalEvent();
+}
+
+function updateDeliveryJamEvent(dt, e){
+  if(!G.box) { finishSurvivalEvent(); return; }
+  if(e.t >= e.dur) finishSurvivalEvent();
+}
+
+function updateFireDrillEvent(dt, e){
+  if(!e.fired && e.target && e.t >= 3){
+    if(G.stations.includes(e.target) && e.target.state !== 'broken' && !fireOn('station', e.target)){
+      startFire('station', e.target);
+    }
+    e.fired = true;
+  }
+  if(e.fired) finishSurvivalEvent();
+}
+
+function updateMachineBreakdownEvent(dt, e){
+  if(!e.fired && e.target && e.t >= 2.5){
+    if(G.stations.includes(e.target) && e.target.state !== 'broken'){
+      breakStation(e.target);
+    }
+    e.fired = true;
+  }
+  if(e.fired) finishSurvivalEvent();
+}
+
+function updateInspectorWalkInEvent(dt, e){
+  if(e.t >= e.dur) finishSurvivalEvent();
+}
+
+function updateSchoolTripEvent(dt, e){
+  e.pulseT = (e.pulseT || 0) - dt;
+  if(e.pulseT <= 0 && e.spawned < 3){
+    const c = spawnCustomer('family');
+    if(c){
+      e.spawned++;
+      floater(DOOR.x+30, DOOR.y+60, 'field trip!', '#6ec6ff', 13);
+    }
+    e.pulseT = 1.6;
+  }
+  if(e.spawned >= 3 || e.t >= e.dur) finishSurvivalEvent();
+}
+
+/* ==== EVENT 9: VIP DOUBLE BOOKING ==== */
+function updateVipDoubleBookingEvent(dt, e){
+  e.pulseT = (e.pulseT || 0) - dt;
+  if(e.spawned === 0){
+    const vip = spawnCustomer('vip');
+    if(vip){
+      e.spawned++;
+      floater(vip.x, vip.y-48, 'VIP!', '#ffd24d', 18);
+    }
+  }
+  if(e.spawned === 1 && e.t >= 2.5){
+    const type = pick(['biz','couple','influencer']);
+    const c = spawnCustomer(type);
+    if(c){
+      e.spawned++;
+      floater(c.x, c.y-48, 'double booked!', '#ffd24d', 13);
+    }
+  }
+  if(e.spawned >= 2 || e.t > e.dur) finishSurvivalEvent();
+}
+
+/* ==== EVENT 10: KIKI CHAOS PARADE ==== */
+function spawnParadeRat(){
+  const py = rnd(455, 535);
+  const fromLeft = Math.random() < 0.5;
+  G.rats.push({
+    x: fromLeft ? -24 : W+24, y: py,
+    vx:0, vy:0, state:'parade', carry:null, t:0, flee:0,
+    dir: fromLeft ? 1 : -1, act:null, actT:0,
+    sneaked:false, tripped:false, waved:false, mugged:false,
+    startleCd:0, spin:0, paradeDir: fromLeft ? 1 : -1
+  });
+}
+function updateKikiChaosParadeEvent(dt, e){
+  e.pulseT = (e.pulseT || 0) - dt;
+  if(e.pulseT <= 0 && e.spawned < 3){
+    e.pulseT = 1.2;
+    spawnParadeRat();
+    e.spawned++;
+    floater(rnd(120,360), rnd(440,520), '🐀 parade!', '#b78bff', 13);
+  }
+  const activeStealers = G.rats.filter(r => !r.ally && r.state !== 'flee' && r.state !== 'parade').length;
+  if(!e.firstStealer && e.t > 2 && activeStealers < 2){
+    e.firstStealer = true;
+    spawnRat();
+  }
+  if(!e.secondStealer && G.t > 180 && e.t > 5 && G.panicSm < 0.65 && activeStealers < 2){
+    e.secondStealer = true;
+    spawnRat();
+  }
+  if(!e.reactDone && e.t > 1){
+    e.reactDone = true;
+    crowdReact(240, 480, 'laugh', 360);
+  }
+  if(e.t > e.dur) finishSurvivalEvent();
+}
+
+/* ==== EVENT 11: POWER FLICKER ==== */
+function updatePowerFlickerEvent(dt, e){
+  if(e.t > e.dur) finishSurvivalEvent();
+}
+
+
+
+
 /* ============================ INPUT & DRAG ============================ */
 let pointer={x:0,y:0,down:false,sx:0,sy:0,moved:0};
 let drag=null; // {type, ref, food?, offx, offy}
@@ -1675,11 +2028,15 @@ function gameTap(x,y){
   for(const r of G.rats){
     if(dist(x,y,r.x,r.y)<46){ scareRat(r); return; }
   }
-  // tap station to cook
-  for(const s of G.stations){
-    if(Math.abs(x-s.x)<62 && y>592 && y<708){
-      tapStation(s); return;
+  // tap station to cook -- pick the CLOSEST station within a generous 74px radius
+  // this eliminates the fryer-drinks fumble (they were 152px apart with 62px hit zones = 28px gap)
+  if(y>592 && y<708){
+    let closest=null, closestD=1e9;
+    for(const s of G.stations){
+      const d=Math.abs(x-s.x);
+      if(d<74 && d<closestD){ closestD=d; closest=s; }
     }
+    if(closest){ tapStation(closest); return; }
   }
 }
 function tapStation(s){
@@ -1749,10 +2106,15 @@ function resolveDrop(d,x,y){
         else { floater(c.x,c.y-58,'Not my order!','#ff8a8a',16); A.sfx('buzz'); return; }
       }
     }
-    // dropped in empty space — softer feedback, food goes back to station cleanly, no punitive buzz
+    // dropped in empty space — clearer feedback at the drop point so player sees it happened
     A.sfx('pop');
-    puff(s.x,580,'rgba(255,255,255,0.6)',3,50,2,0.3);
-    sparkle(s.x,580,'rgba(255,255,255,0.8)',3);
+    puff(x,y,'rgba(255,255,255,0.7)',4,60,3,0.35); // at drop location
+    floater(x,y-20,'too far','rgba(255,255,255,0.6)',12); // gentle "why nothing happened" cue
+    // and a soft "return" trail from drop point back to station
+    for(let i=0;i<3;i++){
+      const k=i/2;
+      sparkle(x+(s.x-x)*k, y+(580-y)*k, 'rgba(255,220,120,0.6)', 1);
+    }
   }
   else if(d.type==='plates'){
     if(dist(x,y,G.bin.x,G.bin.y)<58){
@@ -1958,6 +2320,11 @@ function buildEvent(){
   if(dirt>=2&&G.rats.length===0){ schedule(3,()=>spawnRat(),'Scratching sounds from the walls...'); return; }
   if(MOD().id==='rainy'&&G.puddles.length<2){ schedule(3,()=>spawnPuddle(),'You hear dripping somewhere...'); return; }
   if(G.puddles.length===0&&MOD().id!=='sunny'&&Math.random()<0.5){ schedule(3,()=>spawnPuddle(),'You hear dripping somewhere...'); return; }
+  // guarantee: if a run has gone through 1+ cycles without any leak ever appearing, bump the odds
+  // so mopping stays a real part of the game instead of getting lost in the cascade priority
+  if(G.cycle>=1&&G.puddles.length===0&&!G.mem.leakRecent&&MOD().id!=='sunny'&&Math.random()<0.75){
+    schedule(3,()=>spawnPuddle(),'You hear dripping somewhere...'); return;
+  }
   if(!G.box&&G.boostT<=0){ schedule(3,()=>spawnBox(),'A delivery van is backing up outside...'); return; }
   if(!G.treat&&(G.t-(G.lastTreatAt||-999))>50&&Math.random()<0.3){ G.lastTreatAt=G.t; schedule(2,()=>spawnTreat(),'Kiki is up to something near the pantry...'); return; }
   schedule(3,()=>spawnCustomer('critic'),'Someone with a notepad is reading the menu outside...');
@@ -1965,13 +2332,7 @@ function buildEvent(){
 
 function director(dt){
   const t=G.t;
-  /* ---- scripted rush hours: the clock is a promise the player learns ---- */
-  if(!G.rushed.noon&&t>72){ G.rushed.noon=true;
-    schedule(8,()=>lunchRush('LUNCH RUSH!!'),'It\u2019s almost noon. Brace yourself...');
-  }
-  if(!G.rushed.dinner&&t>192){ G.rushed.dinner=true;
-    schedule(8,()=>lunchRush('DINNER RUSH!!'),'The dinner crowd is gathering outside...');
-  }
+  // scheduled lunch/dinner rushes removed -- rushes now come from random SURVIVAL_EVENTS
 
   /* ---- run the plan (frozen during a Last Stand — pure showdown) ---- */
   if(G.lastStand>0){ for(const p of G.plan)p.at+=dt; }
@@ -2049,12 +2410,14 @@ function updateGame(dt){
   if(G.goalPingCd>0)G.goalPingCd=Math.max(0,G.goalPingCd-dt);
   updateSpecialEvent(dt);
   director(dt);
+  updateSurvivalEvents(dt);
   seatCustomers();
 
   // combo timer
   if(G.comboT>0){ G.comboT-=dt; if(G.comboT<=0)G.combo=0; }
   if(G.boostT>0)G.boostT-=dt;
   if(G.blackout>0)G.blackout-=dt;
+  if(G.powerFlickerT>0) G.powerFlickerT = Math.max(0, G.powerFlickerT - dt);
   if(G.viralT>0)G.viralT-=dt;
   if(G.morale>0)G.morale-=dt;
   if(G.freshCd>0)G.freshCd-=dt;
@@ -2115,14 +2478,7 @@ function updateGame(dt){
   }
 
   /* DAY ROLLOVER: survive to closing time and the diner refuses to close */
-  if(G.t>=G.day*240){
-    G.day++;
-    gainHeart(); confetti(240,260,20); crowdReact(240,350,'clap',500);
-    note('🌙 CLOSING TIME → DAY '+G.day+'!','#7cf2c0');
-    addStory('You survived the whole day. The diner rolls into Day '+G.day+'.',4);
-    if(G.tables.length<5){ G.tables.push({x:240,y:350,customer:null,plates:0,plateT:0,warned:false,sparkT:1}); note('🪑 New table installed!','#ffd93d'); }
-    A.sfx('achieve');
-  }
+  // day rollover / closing time removed -- endless survival now
   /* customers */
   const fireFear=G.fires.length>0?1.5:1;
   for(let i=G.customers.length-1;i>=0;i--){
@@ -2414,10 +2770,11 @@ function updateGame(dt){
       continue;
     }
     if(r.state==='parade'){
-      r.x+=140*dt;
+      const pdir = r.paradeDir || 1; // backward compatible: existing parade rats stay left-to-right
+      r.x += 140 * pdir * dt;
       if(Math.random()<dt*4) sparkle(r.x,r.y-14,'#ffd93d',1);
       if(Math.random()<dt*2){ S.data.coins=(S.data.coins||0)+1; coinBurst(r.x,r.y-10,1); }
-      if(r.x>W+30){ G.rats.splice(i,1); }
+      if((pdir > 0 && r.x > W+30) || (pdir < 0 && r.x < -30)){ G.rats.splice(i,1); }
       continue;
     }
     if(r.state==='ally'){
@@ -3311,9 +3668,11 @@ function drawCustomer(c){
     cx.restore();
   }
   cx.restore();
-  // order bubble
+  // order bubble — stable position, does NOT inherit customer angry tremble
+  // (customer body can shake for emotion; the bubble stays readable)
   if(c.state==='waiting'){
-    const by=y-58;
+    const bx=c.x;           // stable, no tremble
+    const by=c.y+bobY-58;   // follow gentle bob but not shake
     const r=clamp(c.patience/c.maxPat,0,1);
     const col= r>0.55?'#7cd67c': r>0.28?'#ffd24d':'#ff5a5f';
     // heartbeat: pulse frequency and amplitude both accelerate as patience approaches zero
@@ -3321,7 +3680,7 @@ function drawCustomer(c){
     const beatFreq=8+alarm*14; // 8Hz at 0.28, 22Hz near zero
     const beatAmp=0.06+alarm*0.08; // 0.06 at 0.28, 0.14 near zero
     const pulse=alarm>0?1+Math.sin(G.t*beatFreq)*beatAmp:1;
-    cx.save();cx.translate(x,by);cx.scale(pulse,pulse);
+    cx.save();cx.translate(bx,by);cx.scale(pulse,pulse);
     cx.fillStyle='#fff'; cx.beginPath();cx.arc(0,0,22+(c.orders.length>1?6:0),0,TAU);cx.fill();
     cx.lineWidth=3.4;cx.strokeStyle=TH().ink;cx.stroke();
     cx.beginPath();cx.moveTo(-6,20);cx.lineTo(0,30);cx.lineTo(6,20);cx.fillStyle='#fff';cx.fill();
@@ -3367,21 +3726,9 @@ function drawStation(s){
   // progress
   if(s.state==='cook'){
     const prog=clamp(s.prog,0,1);
-    // background bar (small, keeps precise progress reading)
+    // horizontal progress bar -- the sole cook progress indicator
     cx.fillStyle='rgba(0,0,0,0.25)'; rr(-40,10,80,10,5); cx.fill();
     cx.fillStyle='#ffd93d'; rr(-40,10,80*prog,10,5); cx.fill();
-    // big circular ring around station -- readable at a glance from anywhere on screen
-    const nearDone=prog>0.82;
-    const flash=nearDone?1+Math.sin(G.t*14)*0.06:1; // pulse when nearly done
-    cx.save();
-    cx.lineWidth=4;
-    cx.strokeStyle='rgba(0,0,0,0.18)';
-    cx.beginPath();cx.arc(0,0,50,0,TAU);cx.stroke();
-    cx.lineWidth=4.5*flash;
-    cx.strokeStyle=nearDone?'#ffd42f':'#ffd93d';
-    cx.lineCap='round';
-    cx.beginPath();cx.arc(0,0,50,-Math.PI/2,-Math.PI/2+TAU*prog);cx.stroke();
-    cx.restore();
   }
   if(s.state==='fixing'){
     cx.fillStyle='rgba(0,0,0,0.25)'; rr(-40,10,80,10,5); cx.fill();
@@ -3633,18 +3980,43 @@ function drawTools(){
 }
 function drawHUD(){
   const th=TH();
+  // resume countdown -- brief pause so player can orient before chaos resumes
+  if(G.resumeCountdown>0){
+    G.resumeCountdown-=0.02; // ~20ms/frame at 60fps means ~1s per number
+    const n=Math.ceil(G.resumeCountdown);
+    if(n>0){
+      cx.save();
+      cx.fillStyle='rgba(15,16,38,0.55)'; cx.fillRect(0,0,W,H);
+      const pulseK=1-(G.resumeCountdown - Math.floor(G.resumeCountdown));
+      const scale=1.3+pulseK*0.5;
+      cx.save(); cx.translate(240,H/2); cx.scale(scale,scale);
+      cx.globalAlpha=1-pulseK*0.4;
+      txtO(String(n),0,0,72,'#ffd93d','#1c1030');
+      cx.restore();
+      cx.restore();
+    }
+  }
+  const gameFrozen=G.resumeCountdown>0; // still tick physics-less during countdown
   // top bar
   cx.fillStyle='rgba(20,22,48,0.88)'; rr(8,8,W-16,52,16); cx.fill();
   // hearts
   const maxH=G.maxHearts||5;
+  // pulse threshold scales with max so prestige'd players still see danger warnings at the right time
+  const dangerT=Math.max(2, Math.floor(maxH*0.4));
   for(let i=0;i<maxH;i++){
     const on=i<G.hearts;
-    const pulse=on&&G.hearts<=2?1+Math.sin(G.t*8)*0.12:1;
-    drawHeart(30+i*26,34,9*pulse,on?'#ff5a7a':'rgba(255,255,255,0.15)');
+    const inDanger=on&&G.hearts<=dangerT;
+    const critical=on&&G.hearts<=Math.max(1,Math.floor(maxH*0.2));
+    // heartbeat accelerates as heart count drops
+    const beatSpeed=critical?12:(inDanger?8:0);
+    const pulse=beatSpeed>0?1+Math.sin(G.t*beatSpeed)*0.14:1;
+    // prestige bonus hearts get a gold outline so they read as "earned"
+    const isPrestigeBonus=i>=5;
+    const heartColor=on?(isPrestigeBonus?'#ffd93d':'#ff5a7a'):'rgba(255,255,255,0.15)';
+    drawHeart(30+i*26,34,9*pulse,heartColor);
   }
   // clock
-  txt(fmtClock(G.t),240,26,17,'#fff');
-  txt(fmtTime(G.t)+' survived'+(G.day>1?'  ·  DAY '+G.day:''),240,45,11,G.day>1?'#7cf2c0':'rgba(255,255,255,0.55)');
+  txt('Survived '+fmtTime(G.t),240,32,19,'#fff');
   // money (tweens toward true value)
   G.moneyShown+=(G.money-G.moneyShown)*0.12;
   if(G.money-G.moneyShown<0.5)G.moneyShown=G.money;
@@ -4922,7 +5294,7 @@ function drawPause(){
   cx.fillStyle='rgba(15,16,38,0.8)'; cx.fillRect(0,0,W,H);
   txtO('PAUSED',240,200,44,'#ffd93d','#1c1030');
   drawManagerFace(240,290,S.data.skin,1.4);
-  drawBtn(110,360,260,70,'RESUME',()=>{paused=false;},{color:'#2fbf71',size:20});
+  drawBtn(110,360,260,70,'RESUME',()=>{G.resumeCountdown=3;paused=false;},{color:'#2fbf71',size:20});
   drawBtn(110,450,260,58,'RESTART',()=>{newGame();},{color:'#ff6b6b',size:17});
   drawBtn(110,528,260,58,A.on?'SOUND: ON':'SOUND: OFF',()=>{A.on=!A.on;S.data.sound=A.on;S.save();},{color:'#546e7a',size:15});
   drawBtn(110,606,260,58,'QUIT TO MENU',()=>{go('menu');paused=false;},{color:'#455a64',size:15});
@@ -5063,11 +5435,16 @@ function renderGame(still){
     const lerp=0.42+speedBoost*0.30;
     dragVis.x+=dxToTarget*lerp;
     dragVis.y+=dyToTarget*lerp;
-    const tilt=clamp((wpt.x-dragVis.x)*0.045,-0.4,0.4);
+    // no tilt on food so it stays visually centered on the finger; plates still tilt for weight-feel
     cx.save();cx.shadowColor='rgba(0,0,0,0.4)';cx.shadowBlur=14;cx.shadowOffsetY=10;
-    cx.translate(dragVis.x,dragVis.y);cx.rotate(tilt);
-    if(drag.type==='food') drawFood(drag.food,0,0,1.35,drag.food==='burnt');
-    else drawPlate(0,0,1.3);
+    if(drag.type==='food'){
+      cx.translate(dragVis.x,dragVis.y);
+      drawFood(drag.food,0,0,1.35,drag.food==='burnt');
+    } else {
+      const tilt=clamp((wpt.x-dragVis.x)*0.045,-0.4,0.4);
+      cx.translate(dragVis.x,dragVis.y);cx.rotate(tilt);
+      drawPlate(0,0,1.3);
+    }
     cx.restore();
   }
   // drag hand ring (manager's hand — skin colored)
@@ -5253,6 +5630,7 @@ function frame(ts){
   if(screen==='game'&&!paused&&G){
     let gdt=dt;
     if(G.hitstop>0){ G.hitstop-=dt; gdt=dt*0.18; }
+    if(G.resumeCountdown>0){ gdt=0; } // countdown freezes game logic
     updateGame(gdt);
   }
   else { updateParts(dt); updateFloaters(dt); }
